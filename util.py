@@ -21,36 +21,109 @@ from sklearn.cluster import KMeans,SpectralClustering
 from sklearn.metrics.cluster import normalized_mutual_info_score, adjusted_rand_score
 from sklearn.metrics.cluster import homogeneity_score, adjusted_mutual_info_score
 #from sklearn.metrics import calinski_harabasz_score
-from sklearn.preprocessing import MinMaxScaler,MaxAbsScaler
+from sklearn.preprocessing import MinMaxScaler,MaxAbsScaler,StandardScaler
 import metric
 import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style("whitegrid", {'axes.grid' : False})
+#import scanpy as sc
 #matplotlib.rc('xtick', labelsize=20) 
 #matplotlib.rc('ytick', labelsize=20) 
 #matplotlib.rcParams.update({'font.size': 22})
 
+def getNClusters(adata,n_cluster,range_min=0,range_max=3,max_steps=20):
+    this_step = 0
+    this_min = float(range_min)
+    this_max = float(range_max)
+    while this_step < max_steps:
+        #print('step ' + str(this_step))
+        this_resolution = this_min + ((this_max-this_min)/2)
+        sc.tl.louvain(adata,resolution=this_resolution)
+        this_clusters = adata.obs['louvain'].nunique()
+
+        #print('got ' + str(this_clusters) + ' at resolution ' + str(this_resolution))
+
+        if this_clusters > n_cluster:
+            this_max = this_resolution
+        elif this_clusters < n_cluster:
+            this_min = this_resolution
+        else:
+            return(this_resolution, adata)
+        this_step += 1
+
+    print('Cannot find the number of clusters')
+    print('Clustering solution from last iteration is used:' + str(this_clusters) + ' at resolution ' + str(this_resolution))
+
+def clustering_eval(label_true,label_pre):
+    nmi = normalized_mutual_info_score(label_true, label_pre)
+    ari = adjusted_rand_score(label_true, label_pre)
+    homogeneity = homogeneity_score(label_true, label_pre)
+    return nmi, ari, homogeneity
+
+def run_clustering(data,label,n_clusters):
+    #louvain
+    # adata = sc.AnnData(data)
+    # adata.obs['label'] = label
+    # sc.pp.neighbors(adata, n_neighbors=15,use_rep='X')
+    # getNClusters(adata,n_cluster=n_clusters)
+    # adata.obs['louvain'] = [int(item) for item in adata.obs['louvain']]
+    # print('Lauvain: ', clustering_eval(label,adata.obs['louvain']))
+
+    label_pre = KMeans(n_clusters=n_clusters, n_init = 300,init='k-means++').fit_predict(data)
+    print('Kmeans++: ', clustering_eval(label,label_pre))
+    label_pre = KMeans(n_clusters=n_clusters, n_init = 300,init='random').fit_predict(data)
+    print('Kmeans: ', clustering_eval(label,label_pre))
+
+
+
+
+
 
 class scHiC_sampler(object):
     def __init__(self,data_path='data'):
-        self.scHiC_mat = np.load('data/scHiC_channel_processed.npy')
-        self.scHiC_mat = self.scHiC_mat.reshape((self.scHiC_mat.shape[0],-1))
         self.label = np.load('data/Y.npy')
-        self.label_one_hot = np.eye(4)[self.label]
+        #scHiC_mat = np.load('data/scHiC_binary_resize.npy').astype('float16')#(493,250,250,23)
+        #scHiC_mat = np.load('data/scHiC_binary_resize_size=49.npy').astype('float16')#(493,49,49,23)
+        scHiC_mat = np.load('data/encode_data30.npy')
+        idx = [i for i, item in enumerate(self.label) if item==1 or item==2]
+        if False:
+            self.label = self.label[idx]
+            self.label -= 1
+            scHiC_mat = scHiC_mat[idx,:,:,:]
+        self.scHiC_mat = scHiC_mat.reshape((scHiC_mat.shape[0],-1))
+        if False:
+            self.scHiC_mat = PCA(n_components=20, random_state=3456).fit_transform(self.scHiC_mat)
+        self.scHiC_mat = MinMaxScaler().fit_transform(self.scHiC_mat)
+
+        run_clustering(self.scHiC_mat,self.label,4)
+
+        self.nb_classes = len(np.unique(self.label))
+        self.label_one_hot = np.eye(self.nb_classes)[self.label]
         self.N = self.scHiC_mat.shape[0]
+        print('%d cells aross %d cell types'%(self.N,self.nb_classes))
 
     def train(self, batch_size, indx = None, label = False):
         if indx is None:
             indx = np.random.randint(low = 0, high = self.N, size = batch_size)
         if label:
-            return self.scHiC_mat[indx, :], label_one_hot.trn_one_hot[indx]
+            return self.scHiC_mat[indx, :], self.label_one_hot[indx]
         else:
             return self.scHiC_mat[indx, :]
 
     def load_all(self):
-        return self.scHiC_mat, self.label, self.label_one_hot
+        if False:
+            self.scHiC_mat = PCA(n_components=20, random_state=3456).fit_transform(self.scHiC_mat)
+            self.scHiC_mat = MinMaxScaler().fit_transform(self.scHiC_mat)
+            print(np.min(self.scHiC_mat),np.max(self.scHiC_mat))
+            label_pre = KMeans(n_clusters=self.nb_classes, n_init = 500).fit_predict(self.scHiC_mat)
+            ari = adjusted_rand_score(self.label, label_pre)
+            nmi = normalized_mutual_info_score(self.label, label_pre)
+            print(ari,nmi) 
+            print(np.sum(np.argmax(self.label_one_hot, axis=1)==self.label))
+            sys.exit()
+        return self.scHiC_mat, self.label
     
 
 
@@ -249,7 +322,6 @@ class DataSampler(object):
             #only keep 1,3,7,8,9 where nb>5000
             # dic_nb = {item:0 for item in range(11)}
             # keep_ind=[]
-            # print len(self.Y)
             # for i in range(len(self.Y)):
             #     dic_nb[self.Y[i]]+=1
             #     if dic_nb[self.Y[i]] <= 5000 and self.Y[i] in [1,3,7,8,9]:
@@ -356,7 +428,6 @@ class Uniform_sampler(object):
         self.mean = mean
         np.random.seed(1024)
         self.centers = np.random.uniform(-0.5,0.5,(self.dim,))
-        #print self.centers
         #self.X = np.random.uniform(self.centers-0.5,self.centers+0.5,size=(self.total_size,self.dim))
         self.Y = None
         self.X = np.random.uniform(self.mean-0.5,self.mean+0.5,(self.total_size,self.dim))
@@ -395,7 +466,7 @@ class Mixture_sampler(object):
         self.nb_classes = nb_classes
         self.total_size = N
         self.dim = dim
-        self.sd = sd 
+        self.sd = sd
         self.scale = scale
         np.random.seed(1024)
         self.X_c = self.scale*np.random.normal(0, self.sd**2, (self.total_size,self.dim))
