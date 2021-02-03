@@ -35,8 +35,9 @@ Instructions: scDEC model
     Dy(.) - discriminator network in y space (observation space)
 '''
 class scDEC(object):
-    def __init__(self, g_net, h_net, dx_net, dy_net, x_sampler, y_sampler, nb_classes, data, pool, batch_size, alpha, beta, is_train):
+    def __init__(self, ae_net, g_net, h_net, dx_net, dy_net, x_sampler, y_sampler, nb_classes, data, pool, batch_size, alpha, beta, is_train):
         self.data = data
+        self.ae_net = ae_net
         self.g_net = g_net
         self.h_net = h_net
         self.dx_net = dx_net
@@ -50,6 +51,7 @@ class scDEC(object):
         self.pool = pool
         self.x_dim = self.dx_net.input_dim
         self.y_dim = self.dy_net.input_dim
+        self.img_dim = self.ae_net.input_dim
 
 
         self.x = tf.placeholder(tf.float32, [None, self.x_dim], name='x')
@@ -57,6 +59,11 @@ class scDEC(object):
         self.x_combine = tf.concat([self.x,self.x_onehot],axis=1,name='x_combine')
 
         self.y = tf.placeholder(tf.float32, [None, self.y_dim], name='y')
+
+        self.img = tf.placeholder(tf.float32, [None, self.img_dim, self.img_dim, 1], name='img')
+        self.encoded,self.decoded, self.decoder_logits = self.ae_net(self.img,reuse=False)
+        self.ae_loss_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.img, logits=self.decoder_logits))
+        self.ae_loss_mse = tf.reduce_mean((self.decoded - self.img)**2)
 
         self.y_ = self.g_net(self.x_combine,reuse=False)
 
@@ -113,12 +120,15 @@ class scDEC(object):
         self.d_loss = self.dx_loss + self.dy_loss + 10*(self.gpx_loss + self.gpy_loss)
 
         self.lr = tf.placeholder(tf.float32, None, name='learning_rate')
+        self.ae_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.5, beta2=0.9) \
+                .minimize(self.ae_loss_entropy, var_list=self.ae_net.vars)
         self.g_h_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.5, beta2=0.9) \
                 .minimize(self.g_h_loss, var_list=self.g_net.vars+self.h_net.vars)
         #self.d_optim = tf.train.GradientDescentOptimizer(learning_rate=self.lr) \
         #        .minimize(self.d_loss, var_list=self.dx_net.vars+self.dy_net.vars)
         self.d_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.5, beta2=0.9) \
                 .minimize(self.d_loss, var_list=self.dx_net.vars+self.dy_net.vars)
+        
 
         now = datetime.datetime.now(dateutil.tz.tzlocal())
         self.timestamp = now.strftime('%Y%m%d_%H%M%S')
@@ -154,8 +164,44 @@ class scDEC(object):
 
         self.sess = tf.Session(config=run_config)
 
+    def ae_pretrain(self,epochs,patience):
+        data = np.load('data/scHiC_binary_data_resize_per_chrom.npy')
+        N = data.shape[0]
+        idx = np.random.choice(N, size=N, replace=False)
+        data = data[idx,:]
+        nb_train = int(0.9*N)
+        data_train = data[:nb_train]
+        data_val = data[nb_train:,:]
+        best_loss_val = -np.inf
+        wait=0
+        for epoch in range(epochs):
+            loss_ent, loss_mse = [], []
+            for i in range(int(data_train.shape[0]/self.batch_size)):
+                batch_train = data_train[i*self.batch_size:(i+1)*self.batch_size]
+                _, ae_loss_entropy, ae_loss_mse = self.sess.run([self.ae_optim, self.ae_loss_entropy, self.ae_loss_mse], feed_dict={self.img:batch_train, self.lr:lr})
+                loss_ent += [ae_loss_entropy]
+                loss_mse += [ae_loss_mse]
+            print('Epoch %d: average training entropy loss: %.4f, mse loss: %.4f'%(epoch, np.mean(loss_ent),np.mean(loss_mse)))
+            #test on valid data
+            data_val_recon = []
+            for i in range(int(data_val.shape[0]/self.batch_size)):
+                batch_val = data_val[i*self.batch_size:(i+1)*self.batch_size]
+                data_recon = self.sess.run(self.decoded, feed_dict={self.img:batch_val})
+                data_val_recon.append(data_recon)
+            data_val_recon = np.concatenta(data_val_recon,axis=0)
+            loss_val = np.mean([(item[0]-item[1])**2 for item in zip(data_val,data_val_recon)])
+            print('Epoch %d: average valid, mse loss: %.4f'%(epoch,loss_val))
+            if loss_val < best_loss_val:
+                best_loss_val = loss_val
+                wait = 0
+            else:
+                wait += 1
+                if wait == patience or epoch=epochs-1:
+                    print('Early stopping!')
+            sys.exit()
 
     def train(self, nb_batches):
+        self.ae_pretrain(self,epochs=100,patience=3)
         data_y = self.y_sampler.load_all()[0] if has_label else self.y_sampler.load_all()
         self.sess.run(tf.global_variables_initializer())
         self.summary_writer=tf.summary.FileWriter(self.graph_dir,graph=tf.get_default_graph())
@@ -368,6 +414,7 @@ if __name__ == '__main__':
     has_label = not args.no_label
     #4,500, 2,128
     #
+    ae_net = model.Autoencoder(input_dim=49,name='autoencoder')
     g_net = model.Generator(input_dim=x_dim,output_dim = y_dim,name='g_net',nb_layers=4,nb_units=500,concat_every_fcl=False)
     h_net = model.Encoder(input_dim=y_dim,output_dim = x_dim+nb_classes,feat_dim=x_dim,name='h_net',nb_layers=4,nb_units=500)
     dx_net = model.Discriminator(input_dim=x_dim,name='dx_net',nb_layers=2,nb_units=128)
@@ -377,7 +424,7 @@ if __name__ == '__main__':
     xs = util.Mixture_sampler(nb_classes=nb_classes,N=10000,dim=x_dim,sd=1)
     ys = util.scHiC_sampler()
 
-    model = scDEC(g_net, h_net, dx_net, dy_net, xs, ys, nb_classes, data, pool, batch_size, alpha, beta, is_train)
+    model = scDEC(ae_net, g_net, h_net, dx_net, dy_net, xs, ys, nb_classes, data, pool, batch_size, alpha, beta, is_train)
 
     if args.train:
         model.train(nb_batches=nb_batches)

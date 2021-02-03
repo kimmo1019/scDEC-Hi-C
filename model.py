@@ -14,6 +14,93 @@ def conv_cond_concat(x, y):
     y_shapes = y.get_shape()
     return tf.concat([x , y*tf.ones([tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2] ,tf.shape(y)[3]])], 3)
 
+class Autoencoder(object):
+    def __init__(self,input_dim, name,hidden_dim=50,layer_norm=False):
+        self.input_dim = input_dim
+        self.name = name
+        self.hidden_dim = hidden_dim
+        self.layer_norm = layer_norm
+
+    def __call__(self, x ,reuse=True):
+        with tf.variable_scope(self.name) as vs:
+            if reuse:
+                vs.reuse_variables()
+            #(None,49,49,1)
+            conv = tcl.convolution2d(x, 128, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            conv = tcl.max_pool2d(conv,[2,2])
+            #(None,24,24,128)
+            print(conv)
+            conv = tcl.convolution2d(conv, 128, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            conv = tcl.max_pool2d(conv,[2,2])
+            #(None,12,12,128)
+            print(conv)
+            conv = tcl.convolution2d(conv, 64, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            conv = tcl.max_pool2d(conv,[2,2])
+            #(None,6,6,64)
+            print(conv)
+            fc = tcl.flatten(conv)
+            print(fc)
+            fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
+            fc = tf.nn.dropout(fc,0.2)
+            fc = tcl.fully_connected(fc, 50, activation_fn=tf.identity)
+            encoded = fc
+            fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
+            fc = tf.nn.dropout(fc,0.2)
+            fc = tcl.fully_connected(fc, 6*6*64, activation_fn=tf.nn.relu)
+            bs = tf.shape(x)[0]
+            conv = tf.reshape(fc, [bs, 6, 6, 64])
+            #(None,6,6,64)
+            print(conv)
+            conv = tf.nn.conv2d_transpose(
+                value = conv,
+                filter = tf.get_variable(name="filter1", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,128,64)), 
+                output_shape = [bs,12,12,128],
+                strides = [1,2,2,1],
+                padding='SAME'
+            )
+            conv = tf.nn.relu(conv)
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            #(None,12,12,128)
+            print(conv)
+            conv = tf.nn.conv2d_transpose(
+                value = conv,
+                filter = tf.get_variable(name="filter2", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,64,128)), 
+                output_shape = [bs,24,24,64],
+                strides = [1,2,2,1],
+                padding='SAME'
+            )
+            conv = tf.nn.relu(conv)
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            #(None,24,24,64)
+            print(conv)
+            conv = tf.nn.conv2d_transpose(
+                value = conv,
+                filter = tf.get_variable(name="filter3", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,1,64)), 
+                output_shape = [bs,49,49,1],
+                strides = [1,2,2,1],
+                padding='VALID'
+            )
+            logits = conv
+            conv = tf.sigmoid(conv)
+            if self.layer_norm:
+                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            decoded = conv 
+            print(conv)
+            return encoded, decoded, logits
+
+    @property
+    def vars(self):
+        return [var for var in tf.global_variables() if self.name in var.name]
+
+
 class Discriminator(object):
     def __init__(self, input_dim, name, nb_layers=2,nb_units=256):
         self.input_dim = input_dim
@@ -639,3 +726,13 @@ class Encoder_pathology_img(object):
     def vars(self):
         return [var for var in tf.global_variables() if self.name in var.name]
 
+if __name__=="__main__":
+    y1 = tf.placeholder(tf.float32, [100, 49, 49, 1], name='y1')
+    ae = Autoencoder('ae')
+    a,b = ae(y1,reuse=False)
+    run_config = tf.ConfigProto()
+    run_config.gpu_options.per_process_gpu_memory_fraction = 1.0
+    run_config.gpu_options.allow_growth = True
+    sess = tf.Session(config=run_config)
+    sess.run(tf.global_variables_initializer())
+    print(a,b)
