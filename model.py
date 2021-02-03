@@ -47,11 +47,11 @@ class Autoencoder(object):
             fc = tcl.flatten(conv)
             print(fc)
             fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
-            fc = tf.nn.dropout(fc,0.2)
+            fc = tf.nn.dropout(fc,rate=0.2)
             fc = tcl.fully_connected(fc, 50, activation_fn=tf.identity)
             encoded = fc
             fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
-            fc = tf.nn.dropout(fc,0.2)
+            fc = tf.nn.dropout(fc,rate=0.2)
             fc = tcl.fully_connected(fc, 6*6*64, activation_fn=tf.nn.relu)
             bs = tf.shape(x)[0]
             conv = tf.reshape(fc, [bs, 6, 6, 64])
@@ -88,10 +88,10 @@ class Autoencoder(object):
                 strides = [1,2,2,1],
                 padding='VALID'
             )
-            logits = conv
-            conv = tf.sigmoid(conv)
             if self.layer_norm:
                 conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
+            logits = conv
+            conv = tf.sigmoid(conv)
             decoded = conv 
             print(conv)
             return encoded, decoded, logits
