@@ -18,7 +18,7 @@ git clone https://github.com/kimmo1019/scDEC-Hi-C
 Installation has been tested in a Linux/MacOS platform.
 
 # Instructions
-We provide detailed step-by-step instructions for running scDEC-Hi-C model including data preprocessing, model training, and model test.
+We provide detailed step-by-step instructions for running scDEC-Hi-C model including data preprocessing, model training.
 
 ## Model implementation
 
@@ -65,6 +65,8 @@ After running, the results will be stored in `results` folder. `data_at_[batch_i
 
 `data_x_`: reconstructed latent variable z.
 `data_x_onehot_`: reconstructed Categorical variable c.
+
+The clustering results could be get easily by `label_pre = np.argmax(data_x_onehot_, axis=1)`.
 
 
 # Contact
