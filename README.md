@@ -25,7 +25,9 @@ We provide detailed step-by-step instructions for running scDEC-Hi-C model inclu
 **Step 1: Data Preparing**
 
 The contacts for each cell is an individual file where each line represents a chromatin contact.
-The formart is `chrom1\tposition1\tchrom2\tposition2`
+The formart is `chrom1\tposition1\tchrom2\tposition2`. The `position` could be the midpoint of a fragment.
+
+
 
 Three types of raw data are required to generate genomic mutation matrix, gene expression matrix and DNA methylation matrix from CCLE database.
 
