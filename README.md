@@ -1,7 +1,7 @@
 # scDEC-Hi-C
 Deep generative modeling and clustering of single cell Hi-C data.
  
-![model](https://github.com/kimmo1019/scDEC-Hi-C/blob/master/model.png)
+![model](https://github.com/kimmo1019/scDEC-Hi-C/blob/main/model.png)
  
 scDEC-Hi-C is a novel end-to-end deep learning framework for analyzing single cell Hi-C data using a multi-stage model. scDEC-Hi-C consists of a chromosome-wise autoencoder (AE) model and a cell-wise deep embedding and clustering model (scDEC).
 
