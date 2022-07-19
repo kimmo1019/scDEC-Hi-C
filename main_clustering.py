@@ -13,13 +13,11 @@ import math
 import util
 import metric
 from sklearn.cluster import KMeans
-from sklearn.metrics.cluster import normalized_mutual_info_score, adjusted_rand_score,homogeneity_score
-import pandas as pd 
-
+from sklearn.metrics import adjusted_rand_score,normalized_mutual_info_score,homogeneity_score
+import pandas as pd
 
 tf.set_random_seed(0)
 tf.reset_default_graph()
-
 
 '''
 Instructions: scDEC model
@@ -34,6 +32,7 @@ Instructions: scDEC model
     Dx(.) - discriminator network in x space (latent space)
     Dy(.) - discriminator network in y space (observation space)
 '''
+
 class scDEC(object):
     def __init__(self, ae_net, g_net, h_net, dx_net, dy_net, x_sampler, y_sampler, nb_classes, data, pool, batch_size, alpha, beta, is_train):
         self.data = data
@@ -51,19 +50,46 @@ class scDEC(object):
         self.pool = pool
         self.x_dim = self.dx_net.input_dim
         self.y_dim = self.dy_net.input_dim
-        self.img_dim = self.ae_net.input_dim
-
+        self.size = self.ae_net.input_dim
+        self.nb_chroms = self.y_sampler.nb_chroms
 
         self.x = tf.placeholder(tf.float32, [None, self.x_dim], name='x')
         self.x_onehot = tf.placeholder(tf.float32, [None, self.nb_classes], name='x_onehot')
         self.x_combine = tf.concat([self.x,self.x_onehot],axis=1,name='x_combine')
 
-        self.y = tf.placeholder(tf.float32, [None, self.y_dim], name='y')
+        #self.y = tf.placeholder(tf.float32, [None, self.y_dim], name='y')
 
-        self.img = tf.placeholder(tf.float32, [None, self.img_dim, self.img_dim, 1], name='img')
-        self.encoded,self.decoded, self.decoder_logits = self.ae_net(self.img,reuse=False)
-        self.ae_loss_entropy = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(labels=self.img, logits=self.decoder_logits))
-        self.ae_loss_mse = tf.reduce_mean(tf.square(self.decoded - self.img))
+        self.data_cell = tf.placeholder(tf.float32, [None, self.size, self.size, self.nb_chroms], name='data_cell')
+        
+        self.data_chrom = tf.transpose(self.data_cell, perm=[0, 3, 1, 2])
+        self.data_chrom = tf.reshape(self.data_chrom, [-1, self.size, self.size])
+        self.data_chrom = tf.expand_dims(self.data_chrom, axis=-1) #(bs*nb_chroms, size, size, 1)
+        
+        #only for pretrain
+        self.single_chrom = tf.placeholder(tf.float32, [None, self.size, self.size, 1], name='single_chrom')
+        self.encoded_single_chrom, self.decoded_single_chrom = self.ae_net(self.single_chrom, reuse=False)
+        self.ae_loss_pretrain = tf.reduce_mean(tf.square(self.decoded_single_chrom - self.single_chrom))
+        #pretrain end
+        
+        #self.ae_list = [self.ae_net(self.data_cell[:,:,:,i:(i+1)]) for i in range(self.nb_chroms)]
+        #self.encoded_chrom = tf.concat([item[0] for item in self.ae_list], axis=0)
+        #self.decoded_chrom = tf.concat([item[1] for item in self.ae_list], axis=0)
+        
+        for i in range(self.nb_chroms):
+            encoded, decoded = self.ae_net(self.data_cell[:,:,:,i:(i+1)])
+            self.encoded_chrom = encoded if i==0 else tf.concat([self.encoded_chrom, encoded],axis=0)
+            self.decoded_chrom = decoded if i==0 else tf.concat([self.decoded_chrom, decoded],axis=0)
+            
+        
+        #self.encoded_chrom, self.decoded_chrom = self.ae_net(self.data_chrom)
+        self.ae_loss_mse = tf.reduce_mean(tf.square(self.decoded_chrom - self.data_chrom))
+        #encoded_chrom with shape (bs*nb_chroms, hidden_dim)
+        
+        self.encoded_cell = tf.reshape(self.encoded_chrom, [tf.shape(self.data_cell)[0], self.nb_chroms, self.ae_net.hidden_dim])
+        self.encoded_cell = tf.reshape(self.encoded_cell, [tf.shape(self.data_cell)[0], self.nb_chroms*self.ae_net.hidden_dim])
+        #self.encoded_cell = tf.reduce_mean(self.encoded_cell, axis = 1)
+        
+        self.y = self.encoded_cell/tf.reduce_max(self.encoded_cell)
 
         self.y_ = self.g_net(self.x_combine,reuse=False)
 
@@ -120,8 +146,12 @@ class scDEC(object):
         self.d_loss = self.dx_loss + self.dy_loss + 10*(self.gpx_loss + self.gpy_loss)
 
         self.lr = tf.placeholder(tf.float32, None, name='learning_rate')
+        
         #self.ae_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.9, beta2=0.999,epsilon=0) \
         #self.ae_optim = tf.train.MomentumOptimizer(learning_rate=self.lr, momentum=0.9) \
+        self.ae_pretrain_optim = tf.train.AdamOptimizer(learning_rate=0.001, beta1=0.9, beta2=0.999,epsilon=1e-07) \
+                .minimize(self.ae_loss_pretrain, var_list=self.ae_net.vars)
+                
         self.ae_optim = tf.train.AdamOptimizer(learning_rate=0.001, beta1=0.9, beta2=0.999,epsilon=1e-07) \
                 .minimize(self.ae_loss_mse, var_list=self.ae_net.vars)
         self.g_h_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.5, beta2=0.9) \
@@ -131,7 +161,6 @@ class scDEC(object):
         self.d_optim = tf.train.AdamOptimizer(learning_rate=self.lr, beta1=0.5, beta2=0.9) \
                 .minimize(self.d_loss, var_list=self.dx_net.vars+self.dy_net.vars)
         
-
         now = datetime.datetime.now(dateutil.tz.tzlocal())
         self.timestamp = now.strftime('%Y%m%d_%H%M%S')
 
@@ -163,66 +192,83 @@ class scDEC(object):
         run_config = tf.ConfigProto()
         run_config.gpu_options.per_process_gpu_memory_fraction = 1.0
         run_config.gpu_options.allow_growth = True
-
         self.sess = tf.Session(config=run_config)
 
-    def ae_pretrain(self,epochs,patience):
-        from sklearn.metrics.cluster import normalized_mutual_info_score, adjusted_rand_score
-        org_data = np.load('data/scHiC_binary_data_resize_per_chrom.npy').astype('float32')
-        Y = np.load('data/Y.npy')
-        data=copy.copy(org_data)
-        N = data.shape[0]
+    def ae_pretrain(self,epochs,patience,batch_size = 32):
+        from sklearn.metrics.cluster import adjusted_rand_score
+        mats_by_chrom_org = self.y_sampler.mats_by_chrom
+        Y = copy.copy(self.y_sampler.Y)
+        N = len(mats_by_chrom_org)
         idx = np.random.choice(N, size=N, replace=False)
-        data = data[idx,:]
+        mats_by_chrom = copy.copy(mats_by_chrom_org)
+        mats_by_chrom = mats_by_chrom[idx,:,:,:]
         nb_train = int(0.9*N)
-        data_train = data[:nb_train]
-        data_val = data[nb_train:,:]
+        data_train = mats_by_chrom[:nb_train]
+        data_val = mats_by_chrom[nb_train:]
         best_loss_val = np.inf
+        best_ari = 0
         lr = 0.001
-        wait=0
+        wait = 0
         for epoch in range(epochs):
-            #idx = np.random.choice(nb_train, size=nb_train, replace=False)
-            #data_train = data_train[idx,:]
-            loss_ent, loss_mse = [], []
-            for i in range(int(np.ceil(data_train.shape[0]/self.batch_size))):
-                batch_train = data_train[i*self.batch_size:(i+1)*self.batch_size]
-                _, ae_loss_entropy, ae_loss_mse = self.sess.run([self.ae_optim, self.ae_loss_entropy, self.ae_loss_mse], feed_dict={self.img:batch_train, self.lr:lr})
-                loss_ent += [ae_loss_entropy]
+            loss_mse = []
+            for i in range(int(np.ceil(data_train.shape[0]/batch_size))):
+                batch_train = data_train[i*batch_size:(i+1)*batch_size]
+                _, ae_loss_mse = self.sess.run([self.ae_pretrain_optim, self.ae_loss_pretrain], feed_dict={self.single_chrom:batch_train, self.lr:lr})
                 loss_mse += [ae_loss_mse]
-            print('Epoch %d: average training entropy loss: %.6f, mse loss: %.6f'%(epoch, np.mean(loss_ent),np.mean(loss_mse)))
+            print('Epoch %d: average training mse loss: %.6f'%(epoch,np.mean(loss_mse)))
             #test on valid data
             data_val_recon = []
-            for i in range(int(np.ceil(data_val.shape[0]/self.batch_size))):
-                batch_val = data_val[i*self.batch_size:(i+1)*self.batch_size]
-                data_recon = self.sess.run(self.decoded, feed_dict={self.img:batch_val})
+            for i in range(int(np.ceil(data_val.shape[0]/batch_size))):
+                batch_val = data_val[i*batch_size:(i+1)*batch_size]
+                data_recon = self.sess.run(self.decoded_single_chrom, feed_dict={self.single_chrom:batch_val})
                 data_val_recon.append(data_recon)
             data_val_recon = np.concatenate(data_val_recon,axis=0)
-            loss_val = np.mean([np.square(item[0]-item[1]) for item in zip(data_val,data_val_recon)])
+            #loss_val = np.mean([np.square(item[0]-item[1]) for item in zip(data_val,data_val_recon)])
+            loss_val = np.mean(np.square(data_val - data_val_recon))
             print('Epoch %d: average valid, mse loss: %.6f'%(epoch,loss_val))
             if loss_val < best_loss_val:
                 best_loss_val = loss_val
-                data_recon = []
-                for i in range(int(np.ceil(org_data.shape[0]/self.batch_size))):
-                    batch_data = org_data[i*self.batch_size:(i+1)*self.batch_size] 
-                    data_encoded = self.sess.run(self.encoded, feed_dict={self.img:batch_data})
-                    data_recon.append(data_encoded)
-                data_recon = np.concatenate(data_recon,axis=0)
-                data_recon = data_recon.reshape((493,23,data_recon.shape[-1]))
-                data_recon = data_recon.reshape((493,-1))
-                label_pre = KMeans(n_clusters=4, n_init = 500,init='random').fit_predict(data_recon)
+                data_encoded = []
+                data_decoded = []
+                for i in range(int(np.ceil(len(mats_by_chrom_org)/batch_size))):
+                    batch_data = mats_by_chrom_org[i*batch_size:(i+1)*batch_size] 
+                    batch_encoded, batch_decoded = self.sess.run([self.encoded_single_chrom, self.decoded_single_chrom], feed_dict={self.single_chrom:batch_data})
+                    data_encoded.append(batch_encoded)
+                    data_decoded.append(batch_decoded)
+                data_encoded = np.concatenate(data_encoded,axis=0)
+                data_decoded = np.concatenate(data_decoded,axis=0)
+                mse_full = np.mean((data_decoded-mats_by_chrom_org)**2)
+                print('full mse error: %.4f'%mse_full)
+                data_encoded = data_encoded.reshape((self.y_sampler.N, self.y_sampler.nb_chroms, data_encoded.shape[-1]))
+                data_encoded = data_encoded.reshape((self.y_sampler.N, -1))
+                data_decoded = data_decoded.reshape((self.y_sampler.N, self.y_sampler.nb_chroms, self.size, self.size))
+                label_pre = KMeans(n_clusters=4, n_init = 500,init='random').fit_predict(data_encoded)
                 ari = adjusted_rand_score(Y, label_pre)
-                print('Epoch %d with ARI: %.3f'%(epoch, ari))
+                nmi = normalized_mutual_info_score(Y, label_pre)
+                homo = homogeneity_score(Y, label_pre)
+                print('Epoch %d with ARI, NMI, HOMO: %.3f, %.3f, %.3f'%(epoch, ari, nmi, homo))
+                if ari > best_ari:
+                    best_ari = ari
+                    best_metrics = [ari,nmi,homo]
+                    best_encoded = data_encoded
+                    best_decoded = data_decoded
+                    np.save('%s/data_decoded_epoch%d.npy'%(self.save_dir, epoch), best_decoded)
                 wait = 0
             else:
                 wait += 1
-                if wait > patience or epoch==epochs-1:
+                if wait > patience or epoch==epochs - 1:
                     print('Early stopping!')
-                    sys.exit()
+                    return best_encoded, best_decoded, best_metrics
 
     def train(self, nb_batches):
-        data_y = self.y_sampler.load_all()[0] if has_label else self.y_sampler.load_all()
+        data_y = self.y_sampler.load_all()
         self.sess.run(tf.global_variables_initializer())
-        self.ae_pretrain(epochs=200,patience=5)
+        best_encoded, best_decoded, best_metrics = self.ae_pretrain(epochs=100,patience=5)
+        print(np.max(best_encoded),np.min(best_encoded))
+        np.save('best_encoded_%.3f.npy'%best_metrics[0], best_encoded)
+        np.save('best_decoded_%.3f.npy'%best_metrics[0], best_decoded)
+        print('Pretrain ARI: %.3f' % best_metrics[0])
+        sys.exit()
         self.summary_writer=tf.summary.FileWriter(self.graph_dir,graph=tf.get_default_graph())
         batches_per_eval = 100
         start_time = time.time()
@@ -237,7 +283,7 @@ class scDEC(object):
 
                 idx = np.random.choice(len(data_y), size=self.batch_size, replace=False)
                 by = data_y[idx,:]
-                d_summary,_ = self.sess.run([self.d_merged_summary, self.d_optim], feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.y: by, self.lr:lr})
+                d_summary,_ = self.sess.run([self.d_merged_summary, self.d_optim], feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.data_cell: by, self.lr:lr})
             self.summary_writer.add_summary(d_summary,batch_idx)
 
             bx, bx_onehot = self.x_sampler.train(self.batch_size,weights)
@@ -245,18 +291,25 @@ class scDEC(object):
             by = data_y[idx,:]
 
             #update G
-            g_summary, _ = self.sess.run([self.g_merged_summary ,self.g_h_optim], feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.y: by, self.lr:lr})
+            g_summary, _ = self.sess.run([self.g_merged_summary ,self.g_h_optim], feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.data_cell: by, self.lr:lr})
             self.summary_writer.add_summary(g_summary,batch_idx)
+            
+            #update AE
+            #if batch_idx % 5 == 0:
+            #    bx, bx_onehot = self.x_sampler.train(self.batch_size,weights)
+            #    idx = np.random.choice(len(data_y), size=self.batch_size, replace=False)
+            #    by = data_y[idx,:]
+            #    _ = self.sess.run(self.ae_optim, feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.data_cell: by, self.lr:lr})
             #quick test on a random batch data
             if batch_idx % batches_per_eval == 0:
                 g_loss_adv, h_loss_adv, CE_loss, l2_loss_x, l2_loss_y, g_loss, \
                     h_loss, g_h_loss, gpx_loss, gpy_loss = self.sess.run(
                     [self.g_loss_adv, self.h_loss_adv, self.CE_loss_x, self.l2_loss_x, self.l2_loss_y, \
                     self.g_loss, self.h_loss, self.g_h_loss, self.gpx_loss, self.gpy_loss],
-                    feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.y: by}
+                    feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.data_cell: by}
                 )
                 dx_loss, dy_loss, d_loss = self.sess.run([self.dx_loss, self.dy_loss, self.d_loss], \
-                    feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.y: by})
+                    feed_dict={self.x: bx, self.x_onehot: bx_onehot, self.data_cell: by})
 
                 print('Batch_idx [%d] Time [%.4f] g_loss_adv [%.4f] h_loss_adv [%.4f] CE_loss [%.4f] gpx_loss [%.4f] gpy_loss [%.4f] \
                     l2_loss_x [%.4f] l2_loss_y [%.4f] g_loss [%.4f] h_loss [%.4f] g_h_loss [%.4f] dx_loss [%.4f] dy_loss [%.4f] d_loss [%.4f]' %
@@ -289,10 +342,10 @@ class scDEC(object):
         idx_greater = np.where(weights>=tol)[0]
         weights[idx_less] = np.array([np.random.uniform(2*tol,1./self.nb_classes) for item in idx_less])
         weights[idx_greater] = weights[idx_greater]*(1-np.sum(weights[idx_less]))/np.sum(weights[idx_greater])
-        return weights    
+        return weights
 
     def estimate_weights(self,use_kmeans=False):
-        data_y = self.y_sampler.load_all()[0] if has_label else self.y_sampler.load_all()
+        data_y = self.y_sampler.load_all()
         data_x_, data_x_onehot_ = self.predict_x(data_y)
 
         if use_kmeans:
@@ -306,15 +359,11 @@ class scDEC(object):
         return weights/float(np.sum(weights)) 
 
     def evaluate(self,timestamp,batch_idx):
-        if has_label:
-            data_y, label_y = self.y_sampler.load_all()
-        else:
-            data_y = self.y_sampler.load_all()
+        data_y = self.y_sampler.load_all()
+        label_y = self.y_sampler.Y
         data_x_, data_x_onehot_ = self.predict_x(data_y)
         label_infer = np.argmax(data_x_onehot_, axis=1)
-        print([list(label_infer).count(item) for item in np.unique(label_infer)])
-        print([list(label_y).count(item) for item in np.unique(label_y)])
-
+        print('Nb for each cluster',[np.sum(label_infer==i) for i in range(self.nb_classes)])
         # label_kmeans = KMeans(n_clusters=4, n_init = 200).fit_predict(data_y)
         # ari = adjusted_rand_score(label_y, label_kmeans)
         # nmi = normalized_mutual_info_score(label_y, label_kmeans)
@@ -322,7 +371,6 @@ class scDEC(object):
         # sys.exit()
 
         if has_label:
-            purity = metric.compute_purity(label_infer, label_y)
             nmi = normalized_mutual_info_score(label_y, label_infer)
             ari = adjusted_rand_score(label_y, label_infer)
             homo = homogeneity_score(label_y,label_infer)
@@ -359,7 +407,8 @@ class scDEC(object):
     
     #predict with x_=H(y)
     def predict_x(self,y,bs=256):
-        assert y.shape[-1] == self.y_dim
+        #y: (N,size,size,23)
+        #print(y.shape, self.y_dim)
         N = y.shape[0]
         x_pred = np.zeros(shape=(N, self.x_dim+self.nb_classes)) 
         x_onehot = np.zeros(shape=(N, self.nb_classes)) 
@@ -368,8 +417,8 @@ class scDEC(object):
                ind = np.arange(b*bs, N)
             else:
                ind = np.arange(b*bs, (b+1)*bs)
-            batch_y = y[ind, :]
-            batch_x_,batch_x_onehot_ = self.sess.run([self.x_latent_, self.x_onehot_], feed_dict={self.y:batch_y})
+            batch_y = y[ind]
+            batch_x_,batch_x_onehot_ = self.sess.run([self.x_latent_, self.x_onehot_], feed_dict={self.data_cell: batch_y})
             x_pred[ind, :] = batch_x_
             x_onehot[ind, :] = batch_x_onehot_
         return x_pred, x_onehot
@@ -405,7 +454,7 @@ if __name__ == '__main__':
     parser.add_argument('--K', type=int, default=11,help='number of clusters')
     parser.add_argument('--dx', type=int, default=10,help='dimension of Gaussian distribution')
     parser.add_argument('--dy', type=int, default=20,help='dimension of preprocessed data')
-    parser.add_argument('--bs', type=int, default=64,help='batch size')
+    parser.add_argument('--bs', type=int, default=8,help='batch size')
     parser.add_argument('--nb_batches', type=int, default=50000,help='total number of training batches or the batch idx for loading pretrain model')
     parser.add_argument('--alpha', type=float, default=10.0,help='coefficient of loss term')
     parser.add_argument('--beta', type=float, default=10.0,help='coefficient of loss term')
@@ -431,17 +480,18 @@ if __name__ == '__main__':
     timestamp = args.timestamp
     is_train = args.train
     has_label = not args.no_label
+
+    xs = util.Mixture_sampler(nb_classes = nb_classes, N=10000, dim=x_dim, sd=1)
+    ys = util.scHiC_sampler()
+
     #4,500, 2,128
-    #
-    ae_net = model.Autoencoder(input_dim=49,name='autoencoder')
-    g_net = model.Generator(input_dim=x_dim,output_dim = y_dim,name='g_net',nb_layers=4,nb_units=500,concat_every_fcl=False)
-    h_net = model.Encoder(input_dim=y_dim,output_dim = x_dim+nb_classes,feat_dim=x_dim,name='h_net',nb_layers=4,nb_units=500)
-    dx_net = model.Discriminator(input_dim=x_dim,name='dx_net',nb_layers=2,nb_units=128)
-    dy_net = model.Discriminator(input_dim=y_dim,name='dy_net',nb_layers=2,nb_units=128)
+    ae_net = model.Autoencoder(input_dim = ys.size, hidden_dim=50, name='autoencoder')
+    g_net = model.Generator(input_dim = x_dim,output_dim = y_dim,name='g_net',nb_layers=4,nb_units=500,concat_every_fcl=False)
+    h_net = model.Encoder(input_dim = y_dim,output_dim = x_dim+nb_classes,feat_dim=x_dim,name='h_net',nb_layers=4,nb_units=500)
+    dx_net = model.Discriminator(input_dim = x_dim,name='dx_net',nb_layers=2,nb_units=128)
+    dy_net = model.Discriminator(input_dim = y_dim,name='dy_net',nb_layers=2,nb_units=128)
     pool = util.DataPool(10)
 
-    xs = util.Mixture_sampler(nb_classes=nb_classes,N=10000,dim=x_dim,sd=1)
-    ys = util.scHiC_sampler()
 
     model = scDEC(ae_net, g_net, h_net, dx_net, dy_net, xs, ys, nb_classes, data, pool, batch_size, alpha, beta, is_train)
 

@@ -6,7 +6,6 @@ import copy
 from scipy.special import polygamma
 import scipy.special
 from scipy import pi
-from tqdm import tqdm
 import sys
 import pandas as pd
 from os.path import join
@@ -28,6 +27,8 @@ matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style("whitegrid", {'axes.grid' : False})
+from scipy.signal import convolve2d
+import pickle
 #import scanpy as sc
 #matplotlib.rc('xtick', labelsize=20) 
 #matplotlib.rc('ytick', labelsize=20) 
@@ -76,56 +77,78 @@ def run_clustering(data,label,n_clusters):
     label_pre = KMeans(n_clusters=n_clusters, n_init = 300,init='random').fit_predict(data)
     print('Kmeans: ', clustering_eval(label,label_pre))
 
-
-
-
-
-
 class scHiC_sampler(object):
-    def __init__(self,data_path='data'):
-        self.label = np.load('data/Y.npy')
-        #scHiC_mat = np.load('data/scHiC_binary_resize.npy').astype('float16')#(493,250,250,23)
-        #scHiC_mat = np.load('data/scHiC_binary_resize_size=49.npy').astype('float16')#(493,49,49,23)
-        scHiC_mat = np.load('data/encode_data30.npy')
-        idx = [i for i, item in enumerate(self.label) if item==1 or item==2]
-        if False:
-            self.label = self.label[idx]
-            self.label -= 1
-            scHiC_mat = scHiC_mat[idx,:,:,:]
-        self.scHiC_mat = scHiC_mat.reshape((scHiC_mat.shape[0],-1))
-        if False:
-            self.scHiC_mat = PCA(n_components=20, random_state=3456).fit_transform(self.scHiC_mat)
-        self.scHiC_mat = MinMaxScaler().fit_transform(self.scHiC_mat)
-
-        run_clustering(self.scHiC_mat,self.label,4)
-
-        self.nb_classes = len(np.unique(self.label))
-        self.label_one_hot = np.eye(self.nb_classes)[self.label]
-        self.N = self.scHiC_mat.shape[0]
+    def __init__(self,name='Ramani',size = 112, seed=123, shuffle=False):
+        self.size = size
+        #self.data_norm, self.labels, _ = pickle.load(open("datasets/Ramani/data_norm.pkl",'rb'))
+        #self.labels = np.array([item.strip() for item in open('datasets/%s/label.txt'%name).readlines()])
+        _, self.labels, _ = pickle.load(open("datasets/%s/624/data_norm.pkl"%(name),'rb'))
+        self.Y = np.array([list(np.unique(self.labels)).index(item) for item in self.labels])
+        self.mats = np.load('datasets/%s/%d/data_resize_%d.npy'%(name,len(self.Y),size))
+        self.mats = preprocess(self.mats)
+        assert len(self.labels) == len(self.mats)
+        self.nb_classes = len(np.unique(self.labels))
+        self.N = len(self.mats)
+        self.nb_chroms = self.mats.shape[-1]
+        if shuffle:
+            np.random.seed(seed)
+            idx = np.random.choice(self.N, size=self.N, replace=False)
+            self.mats = self.mats[idx,:,:,:]
+            self.labels = self.labels[idx]
+            self.Y = self.Y[idx]
+        self.mats_by_chrom = self.cell2chrom(self.mats)
         print('%d cells aross %d cell types'%(self.N,self.nb_classes))
+        print(self.mats_by_chrom.shape,self.mats.shape)
 
-    def train(self, batch_size, indx = None, label = False):
+    def cell2chrom(self,mats):
+        print(mats.shape)
+        temp = np.transpose(mats,(0,3,1,2))
+        temp = temp.reshape((-1,temp.shape[-1],temp.shape[-1]))
+        return temp[...,np.newaxis]
+    def train(self, batch_size, indx = None):
         if indx is None:
             indx = np.random.randint(low = 0, high = self.N, size = batch_size)
-        if label:
-            return self.scHiC_mat[indx, :], self.label_one_hot[indx]
-        else:
-            return self.scHiC_mat[indx, :]
+        return self.mats[indx]
 
     def load_all(self):
-        if False:
-            self.scHiC_mat = PCA(n_components=20, random_state=3456).fit_transform(self.scHiC_mat)
-            self.scHiC_mat = MinMaxScaler().fit_transform(self.scHiC_mat)
-            print(np.min(self.scHiC_mat),np.max(self.scHiC_mat))
-            label_pre = KMeans(n_clusters=self.nb_classes, n_init = 500).fit_predict(self.scHiC_mat)
-            ari = adjusted_rand_score(self.label, label_pre)
-            nmi = normalized_mutual_info_score(self.label, label_pre)
-            print(ari,nmi) 
-            print(np.sum(np.argmax(self.label_one_hot, axis=1)==self.label))
-            sys.exit()
-        return self.scHiC_mat, self.label
-    
+        return self.mats
 
+def convolution(mat, kernel_shape=3):
+    conv = np.ones((kernel_shape, kernel_shape)) / (kernel_shape ** 2)
+    mat = convolve2d(mat, conv, 'same')
+    return mat
+
+def random_walk(mat, random_walk_ratio=0.3,t=1):
+    sm = np.sum(mat, axis=1)
+    sm = np.where(sm == 0, 1, sm)
+    sm = np.tile(sm, (len(mat), 1)).T
+    walk = mat / sm
+    for i in range(t):
+        mat = random_walk_ratio * mat.dot(walk) + (1 - random_walk_ratio) * mat
+    return mat
+
+def preprocess(data, use_log=False, binary=True):
+    #As data will be binarized, so w or w/o log will make no difference
+    for i in range(data.shape[0]):
+        for j in range(data.shape[-1]):
+            tmp = data[i,:,:,j]
+            tmp = convolution(tmp)
+            tmp = random_walk(tmp)
+            data[i,:,:,j] = tmp
+    if binary:
+        data_binary = np.zeros(data.shape)
+        for i in range(data.shape[-1]):
+            data_chrom = data[:,:,:,i].copy()
+            l = data_chrom.shape[1]
+            data_chrom = data_chrom.reshape((data_chrom.shape[0],l*l))
+            thres = np.percentile(data_chrom, 80, axis=1)
+            data_chrom = (data_chrom > thres[:,None])
+            data_chrom_binary = data_chrom.reshape((data_chrom.shape[0],l,l))
+            for j in range(data_chrom_binary.shape[0]):
+                data_binary[j,:,:,i] = data_chrom_binary[j]
+        return data_binary
+    else:
+        return data
 
 #scATAC data
 class scATAC_Sampler(object):
@@ -594,8 +617,6 @@ if __name__=='__main__':
     from sklearn.decomposition import NMF
     from scipy.io import mmread
     ys = scHiC_sampler()
-    a,b,c = ys.load_all()
-    print(a.shape,b.shape,c.shape)
     sys.exit()
     name='BM0828_BM1077'
     ys = scATAC_Sampler(name,20)

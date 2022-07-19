@@ -3,8 +3,8 @@ import tensorflow.contrib as tc
 import tensorflow.contrib.layers as tcl
 #the default is relu function
 def leaky_relu(x, alpha=0.2):
-    return tf.maximum(tf.minimum(0.0, alpha * x), x)
-    #return tf.maximum(0.0, x)
+    #return tf.maximum(tf.minimum(0.0, alpha * x), x)
+    return tf.maximum(0.0, x)
     #return tf.nn.tanh(x)
     #return tf.nn.elu(x)
 
@@ -15,86 +15,47 @@ def conv_cond_concat(x, y):
     return tf.concat([x , y*tf.ones([tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2] ,tf.shape(y)[3]])], 3)
 
 class Autoencoder(object):
-    def __init__(self,input_dim, name,hidden_dim=50,layer_norm=False):
+    def __init__(self, input_dim, name, hidden_dim, layer_norm=True, filters=[32,64,64,128]):
         self.input_dim = input_dim
         self.name = name
         self.hidden_dim = hidden_dim
         self.layer_norm = layer_norm
+        self.filters = filters
 
     def __call__(self, x ,reuse=True):
         with tf.variable_scope(self.name) as vs:
             if reuse:
                 vs.reuse_variables()
-            #(None,49,49,1)
-            conv = tcl.convolution2d(x, 128, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            conv = tcl.max_pool2d(conv,[2,2])
-            #(None,24,24,128)
-            print(conv)
-            conv = tcl.convolution2d(conv, 128, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            conv = tcl.max_pool2d(conv,[2,2])
-            #(None,12,12,128)
-            print(conv)
-            conv = tcl.convolution2d(conv, 64, [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            conv = tcl.max_pool2d(conv,[2,2])
-            #(None,6,6,64)
-            print(conv)
-            fc = tcl.flatten(conv)
-            print(fc)
-            fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
-            fc = tf.nn.dropout(fc,rate=0.2)
-            fc = tcl.fully_connected(fc, 50, activation_fn=tf.identity)
+            for i in range(len(self.filters)):
+                x = tcl.dropout(x,keep_prob=0.8)
+                x = tcl.convolution2d(x, self.filters[i], [3,3], [1,1],activation_fn=tf.nn.relu,padding='SAME')
+                x = tcl.max_pool2d(x,[2,2])
+                #print(x)
+                if self.layer_norm:
+                    x = tc.layers.batch_norm(x,decay=0.9,scale=True,updates_collections=None)
+            #(None, 7, 7, 32)
+            x = tcl.flatten(x)
+            fc = tcl.fully_connected(x, self.hidden_dim, activation_fn=tf.nn.relu)
             encoded = fc
-            fc = tcl.fully_connected(fc, 500, activation_fn=tf.nn.relu)
-            fc = tf.nn.dropout(fc,rate=0.2)
-            fc = tcl.fully_connected(fc, 6*6*64, activation_fn=tf.nn.relu)
-            bs = tf.shape(x)[0]
-            conv = tf.reshape(fc, [bs, 6, 6, 64])
-            #(None,6,6,64)
-            print(conv)
-            conv = tf.nn.conv2d_transpose(
-                value = conv,
-                filter = tf.get_variable(name="filter1", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,128,64)), 
-                output_shape = [bs,12,12,128],
-                strides = [1,2,2,1],
-                padding='SAME'
-            )
-            conv = tf.nn.relu(conv)
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            #(None,12,12,128)
-            print(conv)
-            conv = tf.nn.conv2d_transpose(
-                value = conv,
-                filter = tf.get_variable(name="filter2", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,64,128)), 
-                output_shape = [bs,24,24,64],
-                strides = [1,2,2,1],
-                padding='SAME'
-            )
-            conv = tf.nn.relu(conv)
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            #(None,24,24,64)
-            print(conv)
-            conv = tf.nn.conv2d_transpose(
-                value = conv,
-                filter = tf.get_variable(name="filter3", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,1,64)), 
-                output_shape = [bs,49,49,1],
-                strides = [1,2,2,1],
-                padding='VALID'
-            )
-            if self.layer_norm:
-                conv = tc.layers.batch_norm(conv,decay=0.9,scale=True,updates_collections=None)
-            logits = conv
-            conv = tf.sigmoid(conv)
-            decoded = conv 
-            print(conv)
-            return encoded, decoded, logits
+            fc = tcl.fully_connected(fc, 7*7*32, activation_fn=tf.nn.relu)
+            bs = tf.shape(fc)[0]
+            x = tf.reshape(fc, [bs, 7, 7, 32])
+            for i in range(len(self.filters)):
+                nb_filters = 1 if i==len(self.filters)-1 else self.filters[-i]
+                x = tcl.convolution2d_transpose(
+                x, nb_filters, [4,4], [2,2],
+                activation_fn=tf.nn.relu)
+                if self.layer_norm:
+                    x = tc.layers.batch_norm(x,decay=0.9,scale=True,updates_collections=None)
+            decoded = x 
+            return encoded, decoded
+            # conv = tf.nn.conv2d_transpose(
+            #     value = conv,
+            #     filter = tf.get_variable(name="filter1", initializer=tf.random_normal_initializer(stddev=0.02),shape=(3,3,128,64)), 
+            #     output_shape = [bs,12,12,128],
+            #     strides = [1,2,2,1],
+            #     padding='SAME'
+            # )
 
     @property
     def vars(self):
@@ -179,7 +140,7 @@ class Generator(object):
                 fc = leaky_relu(fc)
                 if self.concat_every_fcl:
                     fc = tf.concat([fc, y], 1)
-            
+
             output = tcl.fully_connected(
                 fc, self.output_dim,
                 weights_initializer=tf.random_normal_initializer(stddev=0.02),
@@ -188,7 +149,7 @@ class Generator(object):
                 activation_fn=tf.identity
                 )
             #output = tc.layers.batch_norm(output,decay=0.9,scale=True,updates_collections=None,is_training = True)
-            output = tf.sigmoid(output)
+            #output = tf.sigmoid(output)
             return output
 
     @property
