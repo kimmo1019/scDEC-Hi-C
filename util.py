@@ -34,6 +34,41 @@ import pickle
 #matplotlib.rc('ytick', labelsize=20) 
 #matplotlib.rcParams.update({'font.size': 22})
 
+def compute_inertia(a, X, norm=True):
+    if norm:
+        W = [np.sum(pairwise_distances(X[a == c, :]))/(2.*sum(a == c)) for c in np.unique(a)]
+        return np.sum(W)
+    else:
+        W = [np.mean(pairwise_distances(X[a == c, :])) for c in np.unique(a)]
+        return np.mean(W)
+
+#gap statistic 
+def compute_gap(clustering, data, k_max=10, n_references=100):
+    if len(data.shape) == 1:
+        data = data.reshape(-1, 1)
+    reference_inertia = []
+    for k in range(2, k_max+1):
+        reference = np.random.rand(*data.shape)
+        mins = np.min(data,axis=0)
+        maxs = np.max(data,axis=0)
+        reference = reference*(maxs-mins)+mins
+        local_inertia = []
+        for _ in range(n_references):
+            clustering.n_clusters = k
+            assignments = clustering.fit_predict(reference)
+            local_inertia.append(compute_inertia(assignments, reference))
+        reference_inertia.append(np.mean(local_inertia))
+    
+    ondata_inertia = []
+    for k in range(2, k_max+1):
+        clustering.n_clusters = k
+        assignments = clustering.fit_predict(data)
+        ondata_inertia.append(compute_inertia(assignments, data))
+        
+    gap = np.log(reference_inertia)-np.log(ondata_inertia)
+    return gap, np.log(reference_inertia), np.log(ondata_inertia)
+
+
 def getNClusters(adata,n_cluster,range_min=0,range_max=3,max_steps=20):
     this_step = 0
     this_min = float(range_min)
@@ -82,9 +117,11 @@ class scHiC_sampler(object):
         self.size = size
         #self.data_norm, self.labels, _ = pickle.load(open("datasets/Ramani/data_norm.pkl",'rb'))
         #self.labels = np.array([item.strip() for item in open('datasets/%s/label.txt'%name).readlines()])
-        _, self.labels, _ = pickle.load(open("datasets/%s/624/data_norm.pkl"%(name),'rb'))
+        #_, self.labels, _ = pickle.load(open("datasets/%s/624/data_norm.pkl"%(name),'rb'))
+        _, self.labels, _, _ = pickle.load(open("datasets/%s/data_res_500000.pkl"%name,'rb'))
         self.Y = np.array([list(np.unique(self.labels)).index(item) for item in self.labels])
-        self.mats = np.load('datasets/%s/%d/data_resize_%d.npy'%(name,len(self.Y),size))
+        print([(item,np.sum(self.Y==item)) for item in np.unique(self.Y)])
+        self.mats = np.load('datasets/%s/data_resize_%d.npy'%(name,size))
         self.mats = preprocess(self.mats)
         assert len(self.labels) == len(self.mats)
         self.nb_classes = len(np.unique(self.labels))
